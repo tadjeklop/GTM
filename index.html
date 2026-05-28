@@ -684,6 +684,23 @@
 </head>
 <body>
 <div id="root"></div>
+<script>
+// SW cache buster — runs once per session on version change
+(function() {
+  var SW_VERSION = 'v2';
+  var key = 'sw_ver';
+  if (sessionStorage.getItem(key) !== SW_VERSION) {
+    sessionStorage.setItem(key, SW_VERSION);
+    if ('serviceWorker' in navigator && 'caches' in window) {
+      Promise.all([
+        caches.keys().then(function(keys) { return Promise.all(keys.map(function(k) { return caches.delete(k); })); }),
+        navigator.serviceWorker.getRegistrations().then(function(regs) { return Promise.all(regs.map(function(r) { return r.unregister(); })); })
+      ]).then(function() { location.reload(); });
+      return; // stop — page will reload
+    }
+  }
+})();
+</script>
 <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
 <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
 <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
