@@ -724,6 +724,7 @@ const storage = {
 /* -------------------- UTIL -------------------- */
 const uid = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36).slice(-4);
 const now = () => Date.now();
+const WORKER_URL = 'https://gtm-sync.klopcictadej.workers.dev';
 const fmtDate = (ts) => ts ? new Date(ts).toLocaleDateString('sl-SI', { year: 'numeric', month: '2-digit', day: '2-digit' }) : '';
 const fmtDateTime = (ts) => ts ? new Date(ts).toLocaleString('sl-SI', { year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }) : '';
 const fmtRelative = (ts) => {
@@ -1235,6 +1236,7 @@ const INITIAL_STATE = {
   appSettings: { scoreWeights: { ...DEFAULT_WEIGHTS }, onboardingComplete: false, lastBackup: null },
   workspaces: [],
   currentWorkspaceId: null,
+  userId: null,
   tags: [], ideas: [], projects: [],
   contacts: [], tasks: [], reviews: [],
   goals: [], finances: [], timelines: {}, deals: [],
@@ -1284,8 +1286,38 @@ const loadAll = async () => {
     await storage.set('app:current_workspace', currentWorkspaceId);
   }
 
-  const wsData = await loadWorkspaceData(currentWorkspaceId);
-  return { appSettings, workspaces, currentWorkspaceId, ...wsData };
+  // Persistent user identity for cloud sync
+  let userId = await storage.get('app:userId');
+  if (!userId) {
+    userId = 'u_' + uid();
+    await storage.set('app:userId', userId);
+  }
+
+  // Try cloud pull — use if newer than local
+  let wsData = await loadWorkspaceData(currentWorkspaceId);
+  try {
+    const res = await fetch(`${WORKER_URL}/workspace/${currentWorkspaceId}`, {
+      headers: { 'X-User-Id': userId },
+    });
+    if (res.ok) {
+      const cloud = await res.json();
+      const cloudTs = cloud.updatedAt || 0;
+      const localTs = (wsData.projects || []).reduce((m, p) => Math.max(m, p.updatedAt || 0), 0);
+      if (cloudTs > localTs) {
+        // Cloud is newer — use it and write back to local
+        const merged = {};
+        WS_SUFFIXES.forEach(s => {
+          merged[s] = cloud[s] !== undefined ? cloud[s] : (s === 'timelines' ? {} : []);
+        });
+        for (const [s, v] of Object.entries(merged)) {
+          await storage.set(wsKey(currentWorkspaceId, s), v);
+        }
+        wsData = merged;
+      }
+    }
+  } catch (_) { /* offline — local data is fine */ }
+
+  return { appSettings, workspaces, currentWorkspaceId, userId, ...wsData };
 };
 
 const saveSlice = async (key, value) => storage.set(key, value);
@@ -1619,6 +1651,38 @@ const App = () => {
     loadAll().then(s => { setState(s); setLoaded(true); });
   }, []);
 
+  /* Keep a ref to current state so async callbacks can read it */
+  const stateRef = useRef(null);
+  useEffect(() => { stateRef.current = state; }, [state]);
+
+  /* Handle ?invite=TOKEN on first load */
+  useEffect(() => {
+    if (!loaded) return;
+    const params = new URLSearchParams(window.location.search);
+    const token = params.get('invite');
+    if (!token) return;
+    const userId = stateRef.current?.userId;
+    if (!userId) return;
+    fetch(`${WORKER_URL}/join/${token}`, { headers: { 'X-User-Id': userId } })
+      .then(r => r.json())
+      .then(data => {
+        if (data.error) { alert(data.error); return; }
+        const ws = { id: data.workspaceId, name: data.workspace?.name || 'Skupno', createdAt: Date.now(), team: data.workspace?.team || [] };
+        setState(s => {
+          const alreadyHas = s.workspaces.find(w => w.id === data.workspaceId);
+          const newList = alreadyHas ? s.workspaces : [...s.workspaces, ws];
+          storage.set('app:workspaces', newList);
+          storage.set('app:current_workspace', data.workspaceId);
+          WS_SUFFIXES.forEach(suf => storage.set(wsKey(data.workspaceId, suf), data.workspace?.[suf] ?? (suf === 'timelines' ? {} : [])));
+          return { ...s, workspaces: newList, currentWorkspaceId: data.workspaceId, ...Object.fromEntries(WS_SUFFIXES.map(suf => [suf, data.workspace?.[suf] ?? (suf === 'timelines' ? {} : [])])) };
+        });
+        const url = new URL(window.location.href);
+        url.searchParams.delete('invite');
+        window.history.replaceState({}, '', url);
+      })
+      .catch(() => {});
+  }, [loaded]);
+
   /* Debounced save — track changed slices */
   const savePending = useRef({});
   const flushSaves = useRef(debounce(async () => {
@@ -1629,6 +1693,17 @@ const App = () => {
       const results = await Promise.all(Object.entries(pending).map(([k, v]) => saveSlice(k, v)));
       setSaveStatus(results.every(Boolean) ? 'saved' : 'error');
       setTimeout(() => setSaveStatus(s => s === 'saved' ? 'idle' : s), 1500);
+      // Push to cloud after local save succeeds
+      const s = stateRef.current;
+      if (s?.userId && s.currentWorkspaceId) {
+        const payload = {};
+        WS_SUFFIXES.forEach(suf => { payload[suf] = s[suf]; });
+        fetch(`${WORKER_URL}/workspace/${s.currentWorkspaceId}`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json', 'X-User-Id': s.userId },
+          body: JSON.stringify(payload),
+        }).catch(() => {});
+      }
     } catch (e) { setSaveStatus('error'); }
   }, 400)).current;
 
@@ -4494,22 +4569,24 @@ const TeamSection = ({ ctx }) => {
   const updateRole = (id, newRole) => update.workspaces(prev => prev.map(w =>
     w.id === state.currentWorkspaceId ? { ...w, team: (w.team || []).map(m => m.id === id ? { ...m, role: newRole } : m) } : w));
 
-  const generateInvite = (member) => {
-    const data = {
-      workspace: { id: currentWs?.id, name: currentWs?.name },
-      inviteEmail: member.email, inviteRole: member.role,
-      tags: state.tags, ideas: state.ideas, projects: state.projects,
-      contacts: state.contacts, tasks: state.tasks, reviews: state.reviews,
-      goals: state.goals, finances: state.finances, timelines: state.timelines,
-      deals: state.deals, exportedAt: now(), version: 2,
-    };
-    const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `povabilo-${member.email.split('@')[0]}-${(currentWs?.name || 'ws').replace(/[^a-z0-9]/gi,'_')}.json`;
-    document.body.appendChild(a); a.click(); document.body.removeChild(a);
-    URL.revokeObjectURL(url);
+  const generateInvite = async (member) => {
+    const wsId = currentWs?.id;
+    const userId = state.userId;
+    if (!wsId || !userId) return;
+    try {
+      const res = await fetch(`${WORKER_URL}/invite`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-User-Id': userId },
+        body: JSON.stringify({ workspaceId: wsId, email: member.email, role: member.role }),
+      });
+      const data = await res.json();
+      if (data.error) { alert(data.error); return; }
+      const link = `https://tadjeklop.github.io/GTM/?invite=${data.token}`;
+      await navigator.clipboard.writeText(link);
+      alert(`Povezava za povabilo je v odložišču:\n${link}`);
+    } catch (e) {
+      alert('Napaka pri ustvarjanju povabila.');
+    }
   };
 
   return (
@@ -4537,8 +4614,8 @@ const TeamSection = ({ ctx }) => {
                 onChange={e => updateRole(m.id, e.target.value)}>
                 {TEAM_ROLES.map(r => <option key={r.key} value={r.key}>{r.label}</option>)}
               </select>
-              <button className="btn btn-sm" onClick={() => generateInvite(m)} title="Prenesi povabilo (JSON)">
-                <Icon name="download" size={13} />Povabilo
+              <button className="btn btn-sm" onClick={() => generateInvite(m)} title="Kopiraj povabilno povezavo">
+                <Icon name="link" size={13} />Povabilo
               </button>
               <button className="btn btn-ghost btn-icon btn-danger" onClick={() => removeMember(m.id)}>
                 <Icon name="trash" size={14} />
