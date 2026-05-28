@@ -1,0 +1,26 @@
+{
+  "name": "Podjetniški OS",
+  "short_name": "Podjet. OS",
+  "description": "Operativni sistem za podjetništvo — ideje, projekti, pipeline, kontakti, dnevnik.",
+  "start_url": "./index.html",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#FFFFFF",
+  "theme_color": "#4F46E5",
+  "lang": "sl-SI",
+  "orientation": "any",
+  "icons": [
+    {
+      "src": "data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 192 192'><rect width='192' height='192' rx='40' fill='%234F46E5'/><text x='96' y='128' font-family='ui-sans-serif,system-ui' font-size='96' font-weight='700' fill='white' text-anchor='middle'>OS</text></svg>",
+      "sizes": "192x192",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    },
+    {
+      "src": "data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 512 512'><rect width='512' height='512' rx='108' fill='%234F46E5'/><text x='256' y='340' font-family='ui-sans-serif,system-ui' font-size='256' font-weight='700' fill='white' text-anchor='middle'>OS</text></svg>",
+      "sizes": "512x512",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}
